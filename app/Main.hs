@@ -1,27 +1,27 @@
 module Main where
 
-import Lib
 import Control.Monad.State.Lazy hiding (mapM)
 import GHC.Base hiding (mapM)
 import Util
 import Text.Read (readMaybe)
 import Data.List
 
-newtype VariableName = VariableName String deriving (Eq, Show)
-newtype MemoryAddress = MemoryAddress Int deriving (Eq)
-data Variable = Variable {variableName :: VariableName, variableAddress :: MemoryAddress}
+import Grammar
+import qualified Parsing
+
+newtype MemoryAddress = MemoryAddress {rawValue :: Int} deriving (Eq)
+
+data Variable = Variable {variableName :: VariableNameLiteral, variableAddress :: MemoryAddress}
 data Env = Env {stackPointer :: MemoryAddress, variables :: [Variable], code :: String}
 emptyEnv = Env (MemoryAddress 0) [] ""
 
-newtype Token = Token String
-
-variableExists :: VariableName -> State Env Bool
+variableExists :: VariableNameLiteral -> State Env Bool
 variableExists name = elem name . map variableName . variables <$> get
 
 memoryDiff :: MemoryAddress -> MemoryAddress -> Int
 memoryDiff (MemoryAddress a) (MemoryAddress b) = a - b
 
-findAddress :: VariableName -> State Env MemoryAddress
+findAddress :: VariableNameLiteral -> State Env MemoryAddress
 findAddress name = do
   env <- get
   case find (\v -> name == variableName v) $ variables env of
@@ -29,25 +29,38 @@ findAddress name = do
     Nothing -> error $ "Variable " ++ show name ++ " not found."
 
 -- Find variable offset from current stack pointer
-memoryOffset :: VariableName -> State Env Int
-memoryOffset name = do
-  address <- findAddress name
+memoryOffset :: MemoryAddress -> State Env Int
+memoryOffset address = do
   sp <- stackPointer <$> get
   return $ memoryDiff sp address
+
+setStackPointer :: MemoryAddress -> State Env ()
+setStackPointer sp = get >>= \env -> put $ env {stackPointer = sp}
+
+setVariables :: [Variable]-> State Env ()
+setVariables vars = get >>= \env -> put $ env {variables = vars}
+
+setCode :: String -> State Env ()
+setCode code = get >>= \env -> put $ env {code = code}
 
 addCode :: String -> State Env ()
 addCode c = do
   env <- get
-  let code' = code env ++ c
-  let env' = Env (stackPointer env) (variables env) code'
-  put env'
+  setCode $ code env ++ c
 
-createVar :: VariableName -> State Env ()
+ -- Get the current stack memory address and move the stack pointer by one
+reserveStackAddress :: State Env MemoryAddress
+reserveStackAddress = do
+  env <- get
+  let address = stackPointer env
+  setStackPointer $ MemoryAddress $ rawValue address + 1
+  return address
+
+createVar :: VariableNameLiteral -> State Env ()
 createVar name = do
   env <- get
-  let variables' = variables env ++ [Variable name $ stackPointer env]
-  let sp' = MemoryAddress $ a + 1 where MemoryAddress a = stackPointer env
-  put $ Env sp' variables' $ code env
+  address <- reserveStackAddress
+  setVariables $ variables env ++ [Variable name $ stackPointer env]
   addCode ">"
 
 sqrtAndRem :: Int -> (Int, Int)
@@ -60,11 +73,25 @@ moveCommand n
   where
     moveRightCommand = addCode . flip replicate '>'
     moveLeftCommand = addCode . flip replicate '<'
+
 onRelativePosition :: Int -> State Env () -> State Env ()
 onRelativePosition offset s = do
   moveCommand offset
   s
   moveCommand (negate offset)
+
+onPosition :: MemoryAddress -> State Env () -> State Env ()
+onPosition address s = do
+  offset <- memoryOffset address
+  onRelativePosition offset s
+
+onGreaterThanZero :: State Env () -> State Env ()
+onGreaterThanZero s =
+  inBrackets $ do
+    onRelativePosition 1
+      s
+    reset
+
 incrementCommand :: Int -> State Env ()
 incrementCommand n
   | n < 10 = incrementSimple n
@@ -89,9 +116,10 @@ inBrackets s = do
   addCode "]"
 
 -- Copies variable value into current stack address
-readVariableCommand :: VariableName -> State Env ()
+readVariableCommand :: VariableNameLiteral -> State Env ()
 readVariableCommand name = do
-  offset <- memoryOffset name
+  address <- findAddress name
+  offset <- memoryOffset address
   onRelativePosition (negate offset) $
     inBrackets $ do
       decrementCommand 1
@@ -104,77 +132,85 @@ readVariableCommand name = do
       onRelativePosition (negate (offset + 1)) $ incrementCommand 1
 
 -- Moves current stack address value into variable
-setVariableCommand :: VariableName -> State Env ()
+setVariableCommand :: VariableNameLiteral -> State Env ()
 setVariableCommand name = do
-  offset <- memoryOffset name
-  inBrackets $ do
-    decrementCommand 1
-    onRelativePosition (negate offset) $ incrementCommand 1
+  exists <- variableExists name
+  if exists then do
+    address <- findAddress name
+    offset <- memoryOffset address
+    onRelativePosition (negate offset) reset
+    inBrackets $ do
+      decrementCommand 1
+      onRelativePosition (negate offset) $ incrementCommand 1
+  else
+    createVar name
 
 -- Sets current stack value to zero
 reset :: State Env ()
 reset = inBrackets $ decrementCommand 1
 
+-- Clear the stack frame starting at the given address
+clearStackFrame :: MemoryAddress -> State Env ()
+clearStackFrame framePointer = do
+  reset
+  sp <- stackPointer <$> get
+  when (rawValue sp > rawValue framePointer) $ do
+    setStackPointer $ MemoryAddress $ rawValue sp - 1
+    moveCommand $ negate 1
+    clearStackFrame framePointer
+
 -- Adds value into current stack value. Value can be int or variable
 readValueCommand :: String -> State Env ()
 readValueCommand value = case readMaybe value :: Maybe Int of
   Just value' -> incrementCommand value'
-  Nothing -> readVariableCommand $ VariableName value
+  Nothing -> readVariableCommand $ VariableNameLiteral value
 
 -- Reads char into current stack value.
 readCharCommand :: Char -> State Env ()
 readCharCommand c = incrementCommand $ ord c
 
--- Creates var if it doesn't exist, returns its name
-getVar :: String -> State Env VariableName
-getVar varName = do
-  let var = VariableName varName
-  exists <- variableExists var
-  unless exists $ createVar var
-  return var
+processExpression :: Expression -> State Env ()
+processExpression (ByteLiteralExpression b) = incrementCommand b
+processExpression (VariableExpression variableName) = readVariableCommand variableName
+processExpression (BuiltinFunctionExpression "read" _) = readCommand
+processExpression (BuiltinFunctionExpression "print" (FunctionParams [e])) = processExpression e >> printCommand
+processExpression (BuiltinFunctionExpression "add" (FunctionParams [e1, e2])) = do
+  processExpression e1
+  onRelativePosition 1 $ do
+    processExpression e2
+    inBrackets $ do
+      decrementCommand 1
+      onRelativePosition (negate 1) $ incrementCommand 1
 
-processLine :: [String] -> State Env ()
-processLine ["set", varName, value] = do
-  var <- getVar varName
-  readValueCommand value
-  setVariableCommand var
-processLine ["print", value] = do
-  readValueCommand value
-  printCommand
+inNewStackFrame :: State Env () -> State Env ()
+inNewStackFrame s = do
+  framePointer <- stackPointer <$> get
+  s
+  clearStackFrame framePointer
+
+convertStatement :: Statement -> State Env ()
+convertStatement (ExpressionStatement expression) = do
+  processExpression expression
   reset
-processLine ["printString", value] =
-  forM_ value $ \c -> do
-    readCharCommand c
-    printCommand
+convertStatement (AssignmentStatement variableName expression) = do
+  processExpression expression
+  setVariableCommand variableName
+convertStatement (IfStatement condition body) = do
+  processExpression condition
+  onGreaterThanZero $ inNewStackFrame $ processBlock body
+convertStatement (WhileStatement condition body) = do
+  processExpression condition
+  inBrackets $ do
     reset
-processLine ["add", varName, value1, value2] = do
-  var <- getVar varName
-  readValueCommand value1
-  readValueCommand value2
-  setVariableCommand var
-processLine ["read", varName] = do
-  var <- getVar varName
-  readCommand
-  setVariableCommand var
-processLine _ = return ()
+    inNewStackFrame $ processBlock body
+    processExpression condition
+
+processBlock :: StatementBlock -> State Env ()
+processBlock = foldl1 (>>) . map convertStatement . statements
 
 main :: IO ()
 main = do
-  lines <- readFileLines "test.bf"
---  print $ map parseTokens lines
-  putStrLn $ code $ execState (mapM (processLine . parseTokens) lines) emptyEnv
-
-readFileLines :: String -> IO [String]
-readFileLines fn = lines <$> readFile fn
-
-parseTokens :: String -> [String]
-parseTokens "" = []
-parseTokens (' ':s) = [] : parseTokens s
-parseTokens ('"':s) = parseString s where
-  parseString ('"':s') = parseTokens s'
-  parseString (h:t) = case parseString t of
-                        [] -> [[h]]
-                        h':t' -> (h:h'):t'
-parseTokens (h:t) = case parseTokens t of
-  [] -> [[h]]
-  h':t' -> (h:h'):t'
+  text <- readFile "test.bf"
+  program <- Parsing.parse text
+  let resultingCode = code $ execState (inNewStackFrame $ processBlock program) emptyEnv
+  putStrLn resultingCode

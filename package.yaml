@@ -23,6 +23,11 @@ dependencies:
 - base >= 4.7 && < 5
 - mtl
 - ghc
+- regex-base
+- regex-posix
+- monad-loops
+- text
+- MissingH
 
 library:
   source-dirs: src
