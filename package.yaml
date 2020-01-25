@@ -28,6 +28,7 @@ dependencies:
 - monad-loops
 - text
 - MissingH
+- time
 
 library:
   source-dirs: src

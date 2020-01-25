@@ -5,6 +5,7 @@ import GHC.Base hiding (mapM)
 import Util
 import Text.Read (readMaybe)
 import Data.List
+import Data.Time.Clock.POSIX
 
 import Grammar
 import qualified Parsing
@@ -67,12 +68,10 @@ sqrtAndRem :: Int -> (Int, Int)
 sqrtAndRem n = intSqrt' n 1 where intSqrt' n a = if a*a > n then (a-1, n-((a-1)*(a-1))) else intSqrt' n $ a+1
 
 moveCommand :: Int -> State Env ()
-moveCommand n
-  | n > 0 = moveRightCommand n
-  | otherwise = moveLeftCommand (negate n)
-  where
-    moveRightCommand = addCode . flip replicate '>'
-    moveLeftCommand = addCode . flip replicate '<'
+moveCommand n = do
+  sp <- stackPointer <$> get
+  setStackPointer $ MemoryAddress $ rawValue sp + n
+  addCode $ if n > 0 then replicate n '>' else replicate (negate n) '<'
 
 onRelativePosition :: Int -> State Env () -> State Env ()
 onRelativePosition offset s = do
@@ -94,7 +93,7 @@ onGreaterThanZero s =
 
 incrementCommand :: Int -> State Env ()
 incrementCommand n
-  | n < 10 = incrementSimple n
+  | n < 16 = incrementSimple n
   | otherwise = do
     let (root, rem) = sqrtAndRem n
     onRelativePosition 1 $ do
@@ -155,7 +154,6 @@ clearStackFrame framePointer = do
   reset
   sp <- stackPointer <$> get
   when (rawValue sp > rawValue framePointer) $ do
-    setStackPointer $ MemoryAddress $ rawValue sp - 1
     moveCommand $ negate 1
     clearStackFrame framePointer
 
@@ -181,6 +179,26 @@ processExpression (BuiltinFunctionExpression "add" (FunctionParams [e1, e2])) = 
     inBrackets $ do
       decrementCommand 1
       onRelativePosition (negate 1) $ incrementCommand 1
+processExpression (BuiltinFunctionExpression "subtract" (FunctionParams [e1, e2])) = do
+  processExpression e1
+  onRelativePosition 1 $ do
+    processExpression e2
+    inBrackets $ do
+      decrementCommand 1
+      onRelativePosition (negate 1) $ decrementCommand 1
+processExpression (BuiltinFunctionExpression "zero" (FunctionParams [e])) = do
+  processExpression e
+  onRelativePosition 1 $ incrementCommand 1
+  inBrackets $ do
+    onRelativePosition 1 $ decrementCommand 1
+    reset
+  onRelativePosition 1 $ inBrackets $ do
+    decrementCommand 1
+    onRelativePosition (negate 1) $ incrementCommand 1
+processExpression (BuiltinFunctionExpression "not" (FunctionParams [e])) =
+  processExpression (BuiltinFunctionExpression "zero" (FunctionParams [e]))
+processExpression (BuiltinFunctionExpression "eq" (FunctionParams [e1, e2])) =
+  processExpression (BuiltinFunctionExpression "zero" (FunctionParams [BuiltinFunctionExpression "subtract" (FunctionParams [e1, e2])]))
 
 inNewStackFrame :: State Env () -> State Env ()
 inNewStackFrame s = do
@@ -210,7 +228,17 @@ processBlock = foldl1 (>>) . map convertStatement . statements
 
 main :: IO ()
 main = do
-  text <- readFile "test.bf"
+  startTime <- getPOSIXTime
+  text <- readFile "toUpper.bf"
+  readFileTime <- getPOSIXTime
+  putStrLn $ "Reading file took " ++ show (readFileTime - startTime) ++ "."
+
   program <- Parsing.parse text
+  parseTime <- getPOSIXTime
+  putStrLn $ "Parsing took " ++ show (parseTime - readFileTime) ++ "."
+
   let resultingCode = code $ execState (inNewStackFrame $ processBlock program) emptyEnv
+  generateTime <- getPOSIXTime
+  putStrLn $ "Generating code took " ++ show (generateTime - parseTime) ++ "."
+  putStrLn "Result:"
   putStrLn resultingCode

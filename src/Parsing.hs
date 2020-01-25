@@ -1,4 +1,4 @@
-module Parsing where
+module Parsing(parse) where
 
 import Data.Function ((&))
 import Text.Regex.Posix
@@ -12,7 +12,7 @@ import Debug.Trace (trace)
 import Text.Read (readMaybe)
 import Control.Monad.Identity (Identity)
 
- -- Entry point: Parses the given String
+ -- Parses the given String into a StatementBlock, or prints errors if there are any.
 parse :: String -> IO StatementBlock
 parse text = do
   let t = tokens text
@@ -27,19 +27,17 @@ parse text = do
 
  -- Converts a multiline program string to a list of tokens
 tokens :: String -> [String]
-tokens s = "{" : removeCombinations (words $ replace "\n" " ; " $ putSpacesAroundSymbols s) ++ ["}"]
+tokens s = "{" : removeCombinations (words $ replace "\n" " ; " $ putSpacesAroundSymbols (s ++ "\n")) ++ ["}"]
 
 putSpacesAroundSymbols :: String -> String
 putSpacesAroundSymbols text = foldr (uncurry replace) text symbols
   where
-    symbols = [([c], [' ', c, ' ']) | c <- ['=', '+', '{', '}', '(', ')', ';']]
+    symbols = [([c], [' ', c, ' ']) | c <- ['=', '+', '{', '}', '(', ')', ';', ',']]
 
 removeCombinations :: [String] -> [String]
 removeCombinations (";":";":r) = removeCombinations (";":r)
 removeCombinations (";":"{":r) = removeCombinations ("{":r)
-removeCombinations (";":"}":r) = removeCombinations ("}":r)
 removeCombinations ("{":";":r) = removeCombinations ("{":r)
-removeCombinations ("}":";":r) = removeCombinations ("}":r)
 removeCombinations (h:r) = h : removeCombinations r
 removeCombinations [] = []
 
@@ -49,30 +47,35 @@ removeCombinations [] = []
  -- Parse tokens into list of Statements
 parseStatements :: Parser StatementBlock
 parseStatements = do
-  token <- popToken
-  sb <- case token of
-    "{" -> do
-      stmts <- whileM (("}" /=) <$> peekToken) parseStatement
-      return $ StatementBlock stmts
-    _ -> lift $ unexpectedTokenError "{" token
-  token <- popToken
-  if token == "}"
-    then return sb
-    else lift $ unexpectedTokenError "}" token
+  popTokenMatching "{"
+  stmts <- whileM (("}" /=) <$> peekToken) parseStatement
+  popTokenMatching "}"
+  return $ StatementBlock stmts
 
 parseStatement :: Parser Statement
 parseStatement = do
   tokens <- get
   stmt <- case tokens of
-    (varName:"=":_) -> do
+    ("if":_) -> do -- If statement
+      popTokenMatching "if"
+      popTokenMatching "("
+      expr <- parseExpression
+      popTokenMatching ")"
+      IfStatement expr <$> parseStatements
+    ("while":_) -> do -- While statement
+      popTokenMatching "while"
+      popTokenMatching "("
+      expr <- parseExpression
+      popTokenMatching ")"
+      WhileStatement expr <$> parseStatements
+    (varName:"=":_) -> do -- Assignment
       varName <- popToken
       popToken
       AssignmentStatement (VariableNameLiteral varName) <$> parseExpression
-    _ -> ExpressionStatement <$> parseExpression
-  token <- popToken
-  if token == ";"
-    then return stmt
-    else lift $ unexpectedTokenError ";" token
+    _ -> -- Expression
+      ExpressionStatement <$> parseExpression
+  popTokenMatching ";"
+  return stmt
 
 splitNextEndl s = case break (";" ==) s of
   (expr, ";":rem) -> (expr, rem)
@@ -84,13 +87,35 @@ splitNextEndl s = case break (";" ==) s of
  -- Parse expression
 parseExpression :: Parser Expression
 parseExpression = do
-  token <- popToken
-  if isNumber $ head token
-    then -- Byte literal
-      lift $ ByteLiteralExpression <$> fromMaybe (readMaybe token :: Maybe Int) ("Error parsing number: "++token++".")
-    else -- Variable
-      return $ VariableExpression $ VariableNameLiteral token
+  tokens <- peekTokens 2
+  if (tokens !! 1) == "("
+    then do -- Function call
+      fName <- popToken
+      popTokenMatching "("
+      params <- parseFunctionParams
+      popTokenMatching ")"
+      return $ BuiltinFunctionExpression (head tokens) params
+    else do
+      token <- popToken
+      if isNumber $ head token
+             -- Byte literal
+        then lift $
+             ByteLiteralExpression <$>
+             fromMaybe (readMaybe token :: Maybe Int) ("Error parsing number: " ++ token ++ ".")
+             -- Variable
+        else return $ VariableExpression $ VariableNameLiteral token
 
+ -- Parse function params
+parseFunctionParams :: Parser FunctionParams
+parseFunctionParams = do
+  fst <- peekToken
+  if fst == ")"
+    then -- Empty brackets
+      return $ FunctionParams []
+    else do
+      firstExpression <- parseExpression
+      otherExpressions <- whileM ((")" /=) <$> peekToken) $ popTokenMatching "," >> parseExpression
+      return $ FunctionParams $ firstExpression : otherExpressions
 
  ----- Utilities -----
 
@@ -119,6 +144,13 @@ type Parser t = StateT [String] Failable t
 
 popToken :: Parser String
 popToken = head <$> popTokens 1
+
+popTokenMatching :: String -> Parser String
+popTokenMatching s = do
+  token <- popToken
+  if token == s
+    then return token
+    else lift $ unexpectedTokenError s token
 
 popTokens :: Int -> Parser [String]
 popTokens n = do

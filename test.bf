@@ -1,3 +1,8 @@
-test = 5; test2=10
-123
-test3 =50;
+char = read()
+char_zero = 48
+counter = 0
+while(char) {
+    counter = add(counter, 1);
+    char = read();
+}
+print(add(char_zero, counter));
