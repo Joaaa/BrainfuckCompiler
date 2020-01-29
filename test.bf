@@ -1,8 +1,5 @@
-char = read()
-char_zero = 48
-counter = 0
-while(char) {
-    counter = add(counter, 1);
-    char = read();
+inputChar = read()
+
+if(inputChar) {
+    print(add(inputChar, 1))
 }
-print(add(char_zero, counter));

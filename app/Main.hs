@@ -9,6 +9,7 @@ import Data.Time.Clock.POSIX
 
 import Grammar
 import qualified Parsing
+import System.Environment (getArgs)
 
 newtype MemoryAddress = MemoryAddress {rawValue :: Int} deriving (Eq)
 
@@ -203,8 +204,10 @@ processExpression (BuiltinFunctionExpression "eq" (FunctionParams [e1, e2])) =
 inNewStackFrame :: State Env () -> State Env ()
 inNewStackFrame s = do
   framePointer <- stackPointer <$> get
+  variables <- variables <$> get
   s
   clearStackFrame framePointer
+  setVariables variables
 
 convertStatement :: Statement -> State Env ()
 convertStatement (ExpressionStatement expression) = do
@@ -224,21 +227,19 @@ convertStatement (WhileStatement condition body) = do
     processExpression condition
 
 processBlock :: StatementBlock -> State Env ()
-processBlock = foldl1 (>>) . map convertStatement . statements
+processBlock = mapM_ convertStatement . statements
 
 main :: IO ()
 main = do
+  args <- getArgs
+  let filename = if null args then "test.bf" else head args
   startTime <- getPOSIXTime
-  text <- readFile "toUpper.bf"
-  readFileTime <- getPOSIXTime
-  putStrLn $ "Reading file took " ++ show (readFileTime - startTime) ++ "."
-
-  program <- Parsing.parse text
-  parseTime <- getPOSIXTime
-  putStrLn $ "Parsing took " ++ show (parseTime - readFileTime) ++ "."
-
-  let resultingCode = code $ execState (inNewStackFrame $ processBlock program) emptyEnv
-  generateTime <- getPOSIXTime
-  putStrLn $ "Generating code took " ++ show (generateTime - parseTime) ++ "."
-  putStrLn "Result:"
-  putStrLn resultingCode
+  text <- readFile filename
+  case Parsing.parse text of
+    Left error -> putStrLn error
+    Right program -> do
+      let resultingCode = code $ execState (inNewStackFrame $ processBlock program) emptyEnv
+      putStrLn "Result:"
+      putStrLn resultingCode
+      endTime <- getPOSIXTime
+      putStrLn $ "Finished in " ++ show (endTime - startTime) ++ "."

@@ -12,18 +12,9 @@ import Debug.Trace (trace)
 import Text.Read (readMaybe)
 import Control.Monad.Identity (Identity)
 
- -- Parses the given String into a StatementBlock, or prints errors if there are any.
-parse :: String -> IO StatementBlock
-parse text = do
-  let t = tokens text
-  print t
-  let result = evalStateT parseStatements t
-  case result of
-    Success program -> do
-      print program
-      return program
-    Error e -> error e
-
+ -- Parses the given String into a StatementBlock, or returns errors if there are any.
+parse :: String -> Either String StatementBlock
+parse text = evalStateT parseStatements $ tokens text
 
  -- Converts a multiline program string to a list of tokens
 tokens :: String -> [String]
@@ -119,28 +110,16 @@ parseFunctionParams = do
 
  ----- Utilities -----
 
-data Failable t = Success t | Error String
-instance Functor Failable where
-  fmap = liftM
-instance Applicative Failable where
-  pure = return
-  (<*>) = ap
-instance Monad Failable where
-  return = Success
-  (>>=) (Success t) f = f t
-  (>>=) (Error s) _ = Error s
+type Error = Either String
+type Parser t = StateT [String] Error t
 
- -- Convert Maybe to Failable with given error message
-fromMaybe :: Maybe b -> String -> Failable b
-fromMaybe (Just a) _ = Success a
-fromMaybe Nothing error = Error error
+throwError :: String -> Error t
+throwError = Left
 
- -- Replace error string if there is an error
-withError :: String -> Failable t -> Failable t
-withError new (Error orig) = Error $ new ++ "\nCaused by: " ++ orig
-withError _ t = t
-
-type Parser t = StateT [String] Failable t
+ -- Convert Maybe to Error with given error message
+fromMaybe :: Maybe b -> String -> Error b
+fromMaybe (Just a) = const $ Right a
+fromMaybe Nothing = throwError
 
 popToken :: Parser String
 popToken = head <$> popTokens 1
@@ -157,7 +136,7 @@ popTokens n = do
   tokens <- get
   if length tokens >= n
     then state $ splitAt n
-    else lift $ Error $ "Couldn't find enough tokens. Expected: " ++ show n ++ ", found: " ++ show (length tokens)
+    else lift $ throwError $ "Couldn't find enough tokens. Expected: " ++ show n ++ ", found: " ++ show (length tokens)
 
  -- Get next token without consuming
 peekToken :: Parser String
@@ -169,7 +148,7 @@ peekTokens n = do
   tokens <- get
   if length tokens >= n
     then return $ fst $ splitAt n tokens
-    else lift $ Error $ "Couldn't find enough tokens. Expected: " ++ show n ++ ", found: " ++ show (length tokens)
+    else lift $ throwError $ "Couldn't find enough tokens. Expected: " ++ show n ++ ", found: " ++ show (length tokens)
 
-unexpectedTokenError :: String -> String -> Failable t
-unexpectedTokenError expected found = Error $ "Expected \"" ++ expected ++ "\", found \"" ++ found ++ "\"."
+unexpectedTokenError :: String -> String -> Error t
+unexpectedTokenError expected found = throwError $ "Expected \"" ++ expected ++ "\", found \"" ++ found ++ "\"."
